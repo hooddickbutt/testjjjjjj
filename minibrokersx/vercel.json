@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/minibrokersx/(.*)",
+      "destination": "/minibrokersx/index.html"
+    }
+  ]
+}
