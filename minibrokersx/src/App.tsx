@@ -590,14 +590,7 @@ function Dashboard({
           </div>
           <button
             className="lime-btn buy-mini"
-            onClick={() => {
-              const child = window.open(
-                "/buy",
-                "_blank",
-                "noopener,noreferrer",
-              );
-              if (!child) go("/buy");
-            }}
+            onClick={() => go("/buy")}
             data-testid="button-buy-mini"
           >
             <CircleDollarSign
@@ -832,7 +825,7 @@ function SwapView({
             ) : (
               <div className="swap-title">Swap from MINI</div>
             )}
-            <span className="demo-label">DEMO ONLY</span>
+            <span className="demo-label">ROBINHOOD TESTNET</span>
           </div>
           <div className="swap-box">
             <div className="swap-box-label">
@@ -924,7 +917,7 @@ function SwapView({
             <h3>Swap details</h3>
             <div className="info-line">
               <span>Network</span>
-              <strong>Ethereum</strong>
+              <strong>Robinhood Testnet</strong>
             </div>
             <div className="info-line">
               <span>Route</span>
@@ -1116,6 +1109,14 @@ function StakingView({
   go: (path: string) => void;
 }) {
   const [selected, setSelected] = useState<number[]>([]);
+  const [timeLeft, setTimeLeft] = useState(24 * 60 * 60);
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setTimeLeft((current) => (current <= 0 ? 24 * 60 * 60 : current - 1));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const timerLabel = `${String(Math.floor(timeLeft / 3600)).padStart(2, "0")}h ${String(Math.floor((timeLeft % 3600) / 60)).padStart(2, "0")}m ${String(timeLeft % 60).padStart(2, "0")}s`;
   const owned = state.nfts.filter((nft) => !nft.staked);
   const staked = state.nfts.filter((nft) => nft.staked);
   const toggle = (id: number) =>
@@ -1169,14 +1170,7 @@ function StakingView({
           </button>
           <button
             className="lime-btn"
-            onClick={() => {
-              const child = window.open(
-                "/sell",
-                "_blank",
-                "noopener,noreferrer",
-              );
-              if (!child) go("/sell");
-            }}
+            onClick={() => go("/sell")}
             data-testid="button-staking-sell"
           >
             Sell MINI{" "}
@@ -1218,9 +1212,9 @@ function StakingView({
             Your vault
           </h2>
           <div className="section-note" style={{ marginTop: 5 }}>
-            {owned.length
-              ? "Select owned NFTs to stake"
-              : "Everything is currently earning"}
+              {state.nfts.length
+                ? `${state.nfts.length} minted NFT${state.nfts.length === 1 ? "" : "s"} loaded from your wallet`
+                : "Connect your wallet to load minted NFTs"}
           </div>
         </div>
         <div className="stake-actions">
@@ -1234,31 +1228,24 @@ function StakingView({
             </button>
           )}
           <button
-            className="lime-btn small-btn"
-            disabled={selected.length === 0}
-            onClick={
-              selected.some((id) => staked.some((nft) => nft.id === id))
-                ? unstakeSelected
-                : stakeSelected
-            }
+            className="lime-btn small-btn action-coming-soon"
+            disabled
             data-testid="button-stake-selected"
+            title="Staking activation is pending"
           >
-            {selected.some((id) => staked.some((nft) => nft.id === id))
-              ? "Unstake selected"
-              : "Stake selected"}{" "}
-            ({selected.length})
+            {selected.some((id) => staked.some((nft) => nft.id === id)) ? "Unstake selected" : "Stake selected"}{" "}
+            <span>({selected.length})</span>
+            <small>opens in {timerLabel}</small>
           </button>
           <button
-            className="lime-btn small-btn"
-            onClick={state.claim}
-            disabled={state.rewards <= 0}
+            className="lime-btn small-btn action-coming-soon"
+            disabled
             data-testid="button-claim-rewards"
+            title="Claim activation is pending"
           >
-            <Zap
-              size={12}
-              style={{ verticalAlign: "middle", marginRight: 4 }}
-            />{" "}
+            <Zap size={12} style={{ verticalAlign: "middle", marginRight: 4 }} />{" "}
             Claim rewards
+            <small>opens in {timerLabel}</small>
           </button>
         </div>
       </div>
