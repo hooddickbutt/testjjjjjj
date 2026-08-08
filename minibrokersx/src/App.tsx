@@ -36,6 +36,7 @@ import {
   Zap,
 } from "lucide-react";
 import NotFound from "@/pages/not-found";
+import { CONTRACTS, ROBINHOOD_TESTNET, erc20Abi, mini, nftAbi, publicClient, sendContract, shorten, stakingAbi, toMini, walletClient } from "./web3";
 
 const queryClient = new QueryClient();
 
@@ -202,62 +203,106 @@ function ArtTile({
 }
 
 function useDemoState() {
-  const [nfts, setNfts] = useState<NFT[]>(() => {
-    try {
-      return (
-        JSON.parse(localStorage.getItem("mini-nfts") || "null") || starterNFTs
-      );
-    } catch {
-      return starterNFTs;
-    }
-  });
+  const [nfts, setNfts] = useState<NFT[]>([]);
   const [toast, setToast] = useState("");
-  const [rewards, setRewards] = useState(() =>
-    Number(localStorage.getItem("mini-rewards") || "18.42"),
-  );
-  useEffect(() => {
-    localStorage.setItem("mini-nfts", JSON.stringify(nfts));
-  }, [nfts]);
-  useEffect(() => {
-    localStorage.setItem("mini-rewards", String(rewards));
-  }, [rewards]);
+  const [rewards, setRewards] = useState(0);
+  const [address, setAddress] = useState<string>();
+  const [mintPrice, setMintPrice] = useState<bigint>(0n);
+  const [mintEnabled, setMintEnabled] = useState(false);
+  const [loading, setLoading] = useState(false);
   const flash = (message: string) => {
     setToast(message);
-    window.setTimeout(() => setToast(""), 2800);
+    window.setTimeout(() => setToast(""), 3200);
   };
-  const mint = (quantity: number) => {
-    const start = 1100 + nfts.length * 13;
-    const minted = Array.from({ length: quantity }, (_, index) => ({
-      id: start + index,
-      name: `Signal / ${start + index}`,
-      rarity: (index % 5 === 0 ? "Rare" : "Uncommon") as Rarity,
-      value: index % 5 === 0 ? 248 : 137,
-      variant: (start + index) % 8,
-    }));
-    setNfts((current) => [...minted, ...current]);
-    flash(`${quantity} MINI CORE ${quantity === 1 ? "NFT" : "NFTs"} minted`);
+  const connect = async () => {
+    try {
+      const client = walletClient();
+      const [account] = await client.requestAddresses();
+      const chainId = await client.getChainId();
+      if (chainId !== ROBINHOOD_TESTNET.id) {
+        try { await client.switchChain({ id: ROBINHOOD_TESTNET.id }); } catch { flash("Switch your wallet to Robinhood Chain Testnet (46630)"); return; }
+      }
+      setAddress(account);
+      flash(`Wallet connected: ${shorten(account)}`);
+      await refresh(account);
+    } catch (error) { flash(error instanceof Error ? error.message : "Wallet connection failed"); }
   };
-  const toggleStake = (id: number) =>
-    setNfts((current) =>
-      current.map((nft) =>
-        nft.id === id ? { ...nft, staked: !nft.staked } : nft,
-      ),
-    );
-  const claim = () => {
-    setRewards(0);
-    flash("18.42 MINI rewards claimed to your wallet");
+  const refresh = async (account = address) => {
+    if (!account) return;
+    setLoading(true);
+    try {
+      const [price, enabled, supply, stakedIds, pending] = await Promise.all([
+        publicClient.readContract({ address: CONTRACTS.nft, abi: nftAbi, functionName: "mintPrice" }),
+        publicClient.readContract({ address: CONTRACTS.nft, abi: nftAbi, functionName: "publicMintEnabled" }),
+        publicClient.readContract({ address: CONTRACTS.nft, abi: nftAbi, functionName: "totalSupply" }),
+        publicClient.readContract({ address: CONTRACTS.staking, abi: stakingAbi, functionName: "stakedTokensOf", args: [account as `0x${string}`] }),
+        publicClient.readContract({ address: CONTRACTS.staking, abi: stakingAbi, functionName: "pendingRewardsOf", args: [account as `0x${string}`] }),
+      ]);
+      setMintPrice(price); setMintEnabled(enabled); setRewards(mini(pending));
+      const staked = new Set(stakedIds.map(Number));
+      const owned: NFT[] = [];
+      const max = Number(supply);
+      for (let tokenId = 1; tokenId <= max; tokenId += 1) {
+        try {
+          const owner = await publicClient.readContract({ address: CONTRACTS.nft, abi: nftAbi, functionName: "ownerOf", args: [BigInt(tokenId)] });
+          if (owner.toLowerCase() === account.toLowerCase() || staked.has(tokenId)) {
+            owned.push({ id: tokenId, name: `Signal / ${tokenId}`, rarity: tokenId % 11 === 0 ? "Legendary" : tokenId % 5 === 0 ? "Rare" : "Uncommon", value: 0, variant: tokenId % 8, staked: staked.has(tokenId) });
+          }
+        } catch { /* burned or not yet indexed */ }
+      }
+      setNfts(owned);
+    } catch (error) { flash(error instanceof Error ? error.message : "Could not read the contracts"); }
+    finally { setLoading(false); }
   };
-  return { nfts, toast, rewards, mint, toggleStake, claim, flash };
+  const mint = async (quantity: number) => {
+    if (!address) return connect();
+    setLoading(true);
+    try {
+      const token = await publicClient.readContract({ address: CONTRACTS.nft, abi: nftAbi, functionName: "paymentToken" });
+      const approval = await sendContract(token, erc20Abi, "approve", [CONTRACTS.nft, mintPrice * BigInt(quantity)]);
+      await publicClient.waitForTransactionReceipt({ hash: approval });
+      const tx = await sendContract(CONTRACTS.nft, nftAbi, "mint", [BigInt(quantity)]);
+      flash(`Mint submitted: ${shorten(tx)}`);
+      await publicClient.waitForTransactionReceipt({ hash: tx });
+      flash(`${quantity} MINI CORE NFT${quantity === 1 ? "" : "s"} minted on-chain`);
+      await refresh();
+    } catch (error) { flash(error instanceof Error ? error.message : "Mint transaction failed"); }
+    finally { setLoading(false); }
+  };
+  const toggleStake = async (id: number) => {
+    if (!address) return connect();
+    try {
+      const nft = nfts.find((item) => item.id === id);
+      let tx;
+      if (nft?.staked) tx = await sendContract(CONTRACTS.staking, stakingAbi, "unstakeBatch", [[BigInt(id)]]);
+      else {
+        const approved = await publicClient.readContract({ address: CONTRACTS.nft, abi: nftAbi, functionName: "isApprovedForAll", args: [address as `0x${string}`, CONTRACTS.staking] });
+        if (!approved) { const approval = await sendContract(CONTRACTS.nft, nftAbi, "setApprovalForAll", [CONTRACTS.staking, true]); await publicClient.waitForTransactionReceipt({ hash: approval }); }
+        tx = await sendContract(CONTRACTS.staking, stakingAbi, "stakeBatch", [[BigInt(id)]]);
+      }
+      await publicClient.waitForTransactionReceipt({ hash: tx }); await refresh(); flash(nft?.staked ? "NFT returned to your collection" : "NFT staked in the vault");
+    } catch (error) { flash(error instanceof Error ? error.message : "Staking transaction failed"); }
+  };
+  const claim = async () => {
+    try { const tx = await sendContract(CONTRACTS.staking, stakingAbi, "claimAll"); await publicClient.waitForTransactionReceipt({ hash: tx }); await refresh(); flash("MINI rewards claimed to your wallet"); }
+    catch (error) { flash(error instanceof Error ? error.message : "Claim transaction failed"); }
+  };
+  useEffect(() => { if ((window as any).ethereum) (window as any).ethereum.on?.("accountsChanged", (accounts: string[]) => { const next = accounts[0]; setAddress(next); if (next) refresh(next); }); }, []);
+  return { nfts, toast, rewards, mint, toggleStake, claim, flash, address, connect, refresh, mintPrice, mintEnabled, loading };
 }
 
 function Layout({
   children,
   onOpenMenu,
   menuOpen,
+  address,
+  onConnect,
 }: {
   children: React.ReactNode;
   onOpenMenu: () => void;
   menuOpen: boolean;
+  address?: string;
+  onConnect: () => void;
 }) {
   const [location] = useLocation();
   const nav = [
@@ -315,13 +360,13 @@ function Layout({
         <div className="side-bottom">
           <div className="wallet-box">
             <div className="wallet-label">Connected wallet</div>
-            <div className="wallet-address">0x7F2a...91bC</div>
+            <button className="wallet-address" onClick={onConnect}>{shorten(address)}</button>
             <div className="wallet-status">
-              <span className="pulse" /> Demo mode active
+              <span className="pulse" /> {address ? "Robinhood Testnet connected" : "Connect wallet to begin"}
             </div>
           </div>
           <div className="brand-sub" style={{ margin: "18px 11px 0" }}>
-            BUILD 0.8.14 / ETH MAINNET
+            BUILD 0.9.0 / ROBINHOOD TESTNET
           </div>
         </div>
       </aside>
@@ -344,14 +389,14 @@ function Layout({
           </div>
           <div className="top-actions">
             <div className="network-chip">
-              ETHEREUM{" "}
+              ROBINHOOD TESTNET{" "}
               <span
                 className="pulse"
                 style={{ display: "inline-block", marginLeft: 4 }}
               />
             </div>
-            <button className="address-btn" data-testid="button-wallet">
-              0x7F2a...91bC
+            <button className="address-btn" onClick={onConnect} data-testid="button-wallet">
+              {shorten(address)}
             </button>
           </div>
         </header>
@@ -425,7 +470,7 @@ function Dashboard({
               <div style={{ marginTop: 20 }}>
                 <div className="price-label">Mint price</div>
                 <div className="price">
-                  100 MINI{" "}
+                  {state.mintPrice ? `${mini(state.mintPrice)} MINI` : "Reading on-chain…"}{" "}
                   <span className="muted" style={{ fontSize: 12 }}>
                     + 1 NFT
                   </span>
@@ -463,7 +508,7 @@ function Dashboard({
                     className="mono"
                     style={{ color: "#d4ff00", marginTop: 7, fontSize: 12 }}
                   >
-                    {quantity * 100} MINI
+                    {state.mintPrice ? `${mini(state.mintPrice) * quantity} MINI` : "—"}
                   </div>
                 </div>
               </div>
@@ -1247,8 +1292,7 @@ function StakingView({
           size={15}
           style={{ color: "#d4ff00", verticalAlign: "middle", marginRight: 6 }}
         />{" "}
-        Staking is simulated in this demo. Assets stay in your local browser and
-        no wallet transaction is created.
+        Staking is live on Robinhood Chain Testnet. Every action creates a wallet transaction.
       </div>
     </div>
   );
@@ -1297,7 +1341,7 @@ function App() {
                 setMenuOpen(false);
             }}
           >
-            <Layout menuOpen={menuOpen} onOpenMenu={() => setMenuOpen(true)}>
+            <Layout menuOpen={menuOpen} onOpenMenu={() => setMenuOpen(true)} address={state.address} onConnect={state.connect}>
               {state.toast && (
                 <div className="toast" data-testid="status-toast">
                   {state.toast}
